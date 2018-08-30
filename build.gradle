@@ -1,0 +1,177 @@
+import org.apache.tools.ant.filters.*;
+plugins {
+  	id 'com.jfrog.artifactory' version '4.7.3'
+	id 'groovy'
+	id 'application'
+	id 'com.github.johnrengelman.shadow' version '2.0.2'
+	id 'nebula.ospackage' version '4.6.0'
+	id 'ivy-publish' 
+}
+apply plugin: 'java'
+apply plugin: 'maven'
+apply plugin: 'maven-publish'
+apply plugin: 'groovy'
+apply plugin: 'com.github.johnrengelman.shadow'
+apply plugin: 'nebula.ospackage'
+apply plugin: 'com.jfrog.artifactory'
+apply plugin: 'ivy-publish'
+
+description = 'Cli Programm, which supports migration for selected modules of a cvs repo to a git repo '
+
+sourceCompatibility = 1.8
+targetCompatibility = 1.8
+
+def finalName = 'cvs-to-git'
+
+mainClassName = 'cliStarter'
+def repoTarget= version.endsWith("SNAPSHOT") ? "snapshots" : "releases"
+jar {
+	baseName = "${finalName}"
+ // TODO (jhe, 3.7) 
+ //	exclude('**/apscli.properties')
+} 
+
+
+def savedVersion = version
+
+shadowJar {
+	baseName = "${finalName}"
+	classifier = null
+    version = null
+	exclude 'cmd.sh'
+	exclude '**/downloads/*'
+	exclude '**/uploads/*'
+}
+
+
+dependencies {
+	// Application dependencies
+	compile group: 'org.codehaus.groovy' , name: 'groovy-all', version: '2.4.1'
+	compile 'org.codehaus.groovy:groovy-backports-compat23:2.4.5'
+	compile group: 'com.fasterxml.jackson.core', name: 'jackson-annotations', version: '2.8.4'
+	compile group: 'com.fasterxml.jackson.core', name: 'jackson-core', version: '2.8.4'
+	compile group: 'com.fasterxml.jackson.core', name: 'jackson-databind', version: '2.8.4'
+	runtime group: 'commons-cli' , name: 'commons-cli', version: '1.4'
+	runtime group: 'oracle', name: 'ojdbc'
+	testCompile 'org.spockframework:spock-spring:1.1-groovy-2.4'
+	testCompile 'cglib:cglib-nodep:3.2.2' // for stubbing of classes
+
+}
+
+sourceSets {
+  test {
+    resources {
+      srcDir 'src/test/groovy'
+      include '**/*.properties'
+    }
+  }
+}
+
+task pkgAsGTar(type: Tar) {
+	from "$project.buildDir/${finalName}"
+	archiveName = "${finalName}-${version}.tar.gz"
+	compression = Compression.GZIP
+}
+
+task copyLib( type: Copy ) {
+	into "$project.buildDir/${finalName}"
+	from shadowJar
+	fileMode 0755
+	// In lib we only want jars files to go in lib folder (no dll, exe, bat, etc...)
+	include "*.jar"
+}
+
+
+
+def homeDir = "/opt/${finalName}"
+
+
+// Netflix Nebula Os Package Configuration, see : https://github.com/nebula-plugins/gradle-ospackage-plugin/wiki
+ospackage {
+	packageName = "${finalName}"
+	version = "${savedVersion}"
+	release = 1
+	os = LINUX
+	type = BINARY
+	arch = NOARCH
+
+	into "${homeDir}"
+	
+	from(shadowJar.outputs.files) {
+		fileMode 0644
+		into 'bin'
+	}
+
+	from('packaging/bin') {
+		include '*.sh'
+		fileMode 0755
+		into 'bin'
+		expand project.properties
+	}
+	
+	from('packaging/profile') {
+		include 'apscli.sh'
+		fileMode 0644
+		user 'root'
+		permissionGroup 'root'
+		into '/etc/profile.d'
+		expand project.properties
+	}
+	
+	
+}
+ buildRpm {
+
+}
+
+
+
+publishing {
+	publications {
+	    targz(MavenPublication) {
+			artifact source: pkgAsGTar, extension: 'tar.gz'
+			artifactId = "${finalName}"
+		}
+		yumRpm(IvyPublication) {
+			artifact buildRpm.outputs.getFiles().getSingleFile()
+		}
+	}
+	repositories {
+		maven {
+			name ='deployRepo'
+			url  "${mavenRepoBaseUrl}/${repoTarget}/"
+			credentials {
+				username = repoUser
+				password = repoPassword
+			}
+		}
+	}
+}
+
+artifactoryPublish {}.dependsOn(buildRpm)
+artifactory {
+    contextUrl = "${mavenRepoBaseUrl}"  
+    publish {
+
+        repository {
+            repoKey = 'yumrepodev'   
+            username ="${repoUser}"
+            password = "${repoPassword}"
+            ivy {
+                 artifactLayout = "${buildRpm.outputs.getFiles().getSingleFile().getName()}"
+            }
+        }
+        defaults {
+            publications ('yumRpm')
+            publishBuildInfo = false  
+            publishArtifacts = true   
+            publishPom = false   
+            publishIvy = false  
+        }
+    }
+}
+
+assemble { dependsOn copyLib,pkgAsGTar}
+buildRpm {dependsOn processResources, assemble}
+	
+
